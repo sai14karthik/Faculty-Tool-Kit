@@ -218,14 +218,7 @@ curl http://127.0.0.1:8000/stats
 - **Academic Administrators:** Track sentiment trends in feedback
 - **Researchers:** Extract keywords and analyze text data
 
-## 🔮 Future Enhancements
 
-See `IMPROVEMENTS.md` for a comprehensive list of suggested improvements including:
-- Batch processing
-- Advanced analytics dashboard
-- Export functionality
-- Topic modeling
-- Readability analysis
 
 ## 📝 License
 

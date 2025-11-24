@@ -5,37 +5,36 @@ from pathlib import Path
 DB_PATH = Path(__file__).parent / "faculty_toolkit.db"
 
 def init_db():
-    conn = sqlite3.connect(DB_PATH)
-    cur = conn.cursor()
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS requests (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        endpoint TEXT,
-        payload TEXT,
-        result TEXT,
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-    )
-    """)
-    conn.commit()
-    conn.close()
+    """Initialize the database and create tables if they don't exist"""
+    with sqlite3.connect(DB_PATH) as conn:
+        cur = conn.cursor()
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS requests (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            endpoint TEXT,
+            payload TEXT,
+            result TEXT,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+        """)
+        conn.commit()
 
 def log_request(endpoint: str, payload: str, result: str):
-    conn = sqlite3.connect(DB_PATH)
-    cur = conn.cursor()
-    cur.execute(
-        "INSERT INTO requests (endpoint, payload, result) VALUES (?, ?, ?)",
-        (endpoint, payload, result),
-    )
-    conn.commit()
-    conn.close()
+    """Log a request to the database"""
+    with sqlite3.connect(DB_PATH) as conn:
+        cur = conn.cursor()
+        cur.execute(
+            "INSERT INTO requests (endpoint, payload, result) VALUES (?, ?, ?)",
+            (endpoint, payload, result),
+        )
+        conn.commit()
 
 def reset_requests():
     """Remove all logged requests (used to clear stats)"""
-    conn = sqlite3.connect(DB_PATH)
-    cur = conn.cursor()
-    cur.execute("DELETE FROM requests")
-    conn.commit()
-    conn.close()
+    with sqlite3.connect(DB_PATH) as conn:
+        cur = conn.cursor()
+        cur.execute("DELETE FROM requests")
+        conn.commit()
 
 # ensure DB exists on import
 init_db()

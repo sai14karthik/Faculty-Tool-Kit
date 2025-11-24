@@ -1,15 +1,47 @@
 # backend/utils.py
-from typing import Dict
+from typing import Dict, Optional
 import re
+import json
 from collections import Counter
 import joblib
 from pathlib import Path
+import os
 
 # ML imports
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.linear_model import LogisticRegression
 
+# OpenAI imports
+try:
+    from openai import OpenAI
+    OPENAI_AVAILABLE = True
+except ImportError:
+    OPENAI_AVAILABLE = False
+    OpenAI = None
+
 MODEL_PATH = Path(__file__).parent / "model.joblib"
+
+# Initialize OpenAI client if API key is available
+_openai_client = None
+
+def get_openai_client():
+    """Get or create OpenAI client instance"""
+    global _openai_client
+    if not OPENAI_AVAILABLE:
+        return None
+    
+    if _openai_client is None:
+        api_key = os.getenv("OPENAI_API_KEY")
+        if api_key:
+            _openai_client = OpenAI(api_key=api_key)
+        else:
+            return None
+    
+    return _openai_client
+
+def is_openai_available() -> bool:
+    """Check if OpenAI API is available and configured"""
+    return OPENAI_AVAILABLE and get_openai_client() is not None
 
 # ---------- Summarizer ----------
 def simple_summarize(text: str, max_sentences: int = 2) -> str:
@@ -237,3 +269,95 @@ def predict_sentiment(text: str) -> Dict:
             return {"prediction": 0, "positive_prob": 0.4, "confidence": 0.3}
         else:
             return {"prediction": 1, "positive_prob": 0.5, "confidence": 0.1}
+
+# ---------- OpenAI Functions ----------
+def openai_summarize(text: str, max_length: int = 150) -> Optional[str]:
+    """Summarize text using OpenAI API - optimized for academic feedback and course content"""
+    client = get_openai_client()
+    if not client:
+        return None
+    
+    try:
+        # Calculate appropriate max_tokens (roughly 4 characters per token, but be generous)
+        max_tokens = min(max_length * 2, 500)  # Allow enough tokens for the summary
+        
+        response = client.chat.completions.create(
+            model="gpt-3.5-turbo",
+            messages=[
+                {
+                    "role": "system", 
+                    "content": "You are an expert academic assistant specializing in summarizing course materials, student feedback, and educational content. Create clear, concise summaries that capture the main points and key insights. Focus on preserving important academic terminology and concepts."
+                },
+                {
+                    "role": "user", 
+                    "content": f"Please provide a concise summary of the following academic text. Aim for approximately {max_length} words, focusing on the main points, key concepts, and important details:\n\n{text}"
+                }
+            ],
+            max_tokens=max_tokens,
+            temperature=0.3
+        )
+        summary = response.choices[0].message.content.strip()
+        return summary
+    except Exception as e:
+        print(f"OpenAI summarization error: {e}")
+        return None
+
+def openai_predict_sentiment(text: str) -> Optional[Dict]:
+    """Analyze sentiment using OpenAI API - optimized for academic feedback and student evaluations"""
+    client = get_openai_client()
+    if not client:
+        return None
+    
+    try:
+        response = client.chat.completions.create(
+            model="gpt-3.5-turbo",
+            messages=[
+                {
+                    "role": "system", 
+                    "content": """You are an expert sentiment analyst specializing in academic feedback, student evaluations, and course reviews. 
+                    
+Analyze the sentiment and return ONLY a valid JSON object with:
+- "label": either "POSITIVE" or "NEGATIVE" 
+- "score": a number between 0.0 and 1.0 where:
+  * 0.0-0.3 = strongly negative
+  * 0.3-0.5 = somewhat negative/neutral
+  * 0.5-0.7 = somewhat positive
+  * 0.7-1.0 = strongly positive
+
+Consider the context of academic feedback - constructive criticism with positive intent should be scored appropriately. 
+Mixed feedback should be evaluated based on overall tone and intent."""
+                },
+                {
+                    "role": "user", 
+                    "content": f"Analyze the sentiment of this academic feedback or course evaluation. Return only valid JSON with 'label' and 'score':\n\n{text}"
+                }
+            ],
+            temperature=0.2,  # Lower temperature for more consistent sentiment analysis
+            response_format={"type": "json_object"}
+        )
+        result = response.choices[0].message.content.strip()
+        sentiment_data = json.loads(result)
+        
+        # Normalize the response format
+        label = sentiment_data.get("label", "POSITIVE").upper()
+        if label not in ["POSITIVE", "NEGATIVE"]:
+            # If label is not standard, infer from score
+            score_val = float(sentiment_data.get("score", 0.5))
+            label = "POSITIVE" if score_val >= 0.5 else "NEGATIVE"
+        
+        score = float(sentiment_data.get("score", 0.5))
+        
+        # Ensure score is between 0 and 1
+        score = max(0.0, min(1.0, score))
+        
+        # If label is NEGATIVE, ensure score reflects negativity (invert if needed)
+        if label == "NEGATIVE" and score > 0.5:
+            score = 1.0 - score
+        
+        return {
+            "label": label,
+            "score": score
+        }
+    except Exception as e:
+        print(f"OpenAI sentiment analysis error: {e}")
+        return None

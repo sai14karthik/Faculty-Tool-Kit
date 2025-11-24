@@ -9,6 +9,14 @@ import csv
 from pathlib import Path
 from datetime import datetime
 from collections import Counter, defaultdict
+import os
+
+# Load environment variables from .env file
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    print("Warning: python-dotenv not installed. Set OPENAI_API_KEY as environment variable.")
 
 # Try to import transformers, but allow server to start without it
 try:
@@ -21,7 +29,14 @@ except Exception as e:
 
 # Import local modules
 from db import log_request, reset_requests
-from utils import keyword_analysis, predict_sentiment as utils_predict_sentiment, simple_summarize
+from utils import (
+    keyword_analysis, 
+    predict_sentiment as utils_predict_sentiment, 
+    simple_summarize,
+    openai_summarize,
+    openai_predict_sentiment,
+    is_openai_available
+)
 
 # CSV file path
 CSV_PATH = Path(__file__).parent.parent / "data" / "analysis_results.csv"
@@ -113,7 +128,7 @@ class TextRequest(BaseModel):
 app = FastAPI()
 
 # --------------------------
-# CORS FIX (IMPORTANT)
+# CORS Configuration
 # --------------------------
 
 app.add_middleware(
@@ -150,17 +165,30 @@ def summarize_text(req: TextRequest, save_csv: bool = True):
         if not req.text or not req.text.strip():
             raise HTTPException(status_code=400, detail="Text cannot be empty")
         
-        # Try transformers first, fallback to simple summarizer
-        if summarizer is not None:
+        summary = None
+        
+        # Use OpenAI for summarization (primary method for best results)
+        if is_openai_available():
+            try:
+                summary = openai_summarize(req.text, max_length=150)
+                if summary:
+                    print("✓ Using OpenAI GPT-3.5-turbo for summarization")
+            except Exception as e:
+                print(f"Warning: OpenAI summarization failed, trying fallback: {e}")
+        
+        # Try transformers if OpenAI didn't work
+        if not summary and summarizer is not None:
             try:
                 result = summarizer(req.text, max_length=120, min_length=30, do_sample=False)
                 summary = result[0]["summary_text"]
+                print("Using Transformers for summarization")
             except Exception as e:
-                print(f"Warning: Transformers summarization failed, using fallback: {e}")
-                summary = simple_summarize(req.text, max_sentences=2)
-        else:
-            # Use simple fallback summarizer
+                print(f"Warning: Transformers summarization failed, using simple fallback: {e}")
+        
+        # Use simple fallback summarizer as last resort
+        if not summary:
             summary = simple_summarize(req.text, max_sentences=2)
+            print("Using simple summarizer")
         
         if not summary:
             summary = req.text[:100] + "..." if len(req.text) > 100 else req.text
@@ -216,17 +244,41 @@ def predict_sentiment(req: TextRequest, save_csv: bool = True):
         if not req.text or not req.text.strip():
             raise HTTPException(status_code=400, detail="Text cannot be empty")
         
-        # Try transformers first, fallback to utils model
-        if sentiment is not None:
-            result = sentiment(req.text)[0]
-            response = {"label": result["label"], "score": result["score"]}
-        else:
-            # Fallback to utils.py model
+        response = None
+        
+        # Use OpenAI for sentiment analysis (primary method for best results)
+        if is_openai_available():
+            try:
+                openai_result = openai_predict_sentiment(req.text)
+                if openai_result:
+                    response = openai_result
+                    print("✓ Using OpenAI GPT-3.5-turbo for sentiment analysis")
+            except Exception as e:
+                print(f"Warning: OpenAI sentiment analysis failed, trying fallback: {e}")
+        
+        # Try transformers if OpenAI didn't work
+        if not response and sentiment is not None:
+            try:
+                result = sentiment(req.text)[0]
+                # Normalize label to POSITIVE/NEGATIVE
+                label = result["label"].upper()
+                if label == "POSITIVE":
+                    response = {"label": "POSITIVE", "score": result["score"]}
+                else:
+                    # If label is NEGATIVE, invert the score
+                    response = {"label": "NEGATIVE", "score": 1.0 - result["score"]}
+                print("Using Transformers for sentiment analysis")
+            except Exception as e:
+                print(f"Warning: Transformers sentiment analysis failed, using fallback: {e}")
+        
+        # Fallback to utils.py model
+        if not response:
             result = utils_predict_sentiment(req.text)
             response = {
                 "label": "POSITIVE" if result["prediction"] == 1 else "NEGATIVE",
                 "score": result["positive_prob"]
             }
+            print("Using local model for sentiment analysis")
         
         # Log request to database
         try:
@@ -251,8 +303,7 @@ def get_stats():
     """Get usage statistics from the database"""
     try:
         import sqlite3
-        from pathlib import Path
-        from datetime import datetime, timedelta
+        from datetime import timedelta
         
         DB_PATH = Path(__file__).parent / "faculty_toolkit.db"
         conn = sqlite3.connect(DB_PATH)
@@ -288,7 +339,7 @@ def get_stats():
                     positive_count += 1
                 elif result.get("label") == "NEGATIVE":
                     negative_count += 1
-            except:
+            except (json.JSONDecodeError, KeyError, TypeError):
                 pass
         
         conn.close()
@@ -354,6 +405,7 @@ def health_check():
     return {
         "status": "healthy",
         "transformers_available": TRANSFORMERS_AVAILABLE,
+        "openai_available": is_openai_available(),
         "database": "connected"
     }
 
@@ -526,9 +578,9 @@ def visualize_data():
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error building visualization dataset: {str(e)}")
 
-# OPTIONAL: handles OPTIONS if browser still complains
 @app.options("/{path:path}")
 def options_handler(path: str):
+    """Handle OPTIONS requests for CORS preflight"""
     return {"status": "ok"}
 
 # --------------------------

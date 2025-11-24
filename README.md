@@ -21,6 +21,7 @@ An AI-powered web application for analyzing academic feedback, course notes, and
 ### Prerequisites
 - Python 3.8+
 - pip
+- OpenAI API key (optional, but recommended for better results)
 
 ### Installation
 
@@ -34,7 +35,24 @@ cd faculty_toolkit
 pip install -r requirements.txt
 ```
 
-3. **Start the backend server**
+3. **Configure OpenAI API (Optional but Recommended)**
+   
+   The application works without OpenAI, but using OpenAI API provides significantly better summarization and sentiment analysis results.
+   
+   **Option A: Using environment variable**
+   ```bash
+   export OPENAI_API_KEY="your-api-key-here"
+   ```
+   
+   **Option B: Using .env file**
+   Create a `.env` file in the project root:
+   ```bash
+   echo "OPENAI_API_KEY=your-api-key-here" > .env
+   ```
+   
+   Get your API key from: https://platform.openai.com/api-keys
+
+4. **Start the backend server**
 ```bash
 cd backend
 python main.py
@@ -170,6 +188,14 @@ faculty_toolkit/
 ```
 
 ## 🔧 Configuration
+
+### OpenAI API Integration
+The application uses a smart fallback system:
+1. **OpenAI API** (if configured) - Provides the best quality summaries and sentiment analysis
+2. **Transformers/HuggingFace** - Fallback if OpenAI is not available
+3. **Local ML Models** - Final fallback using scikit-learn
+
+To check if OpenAI is configured, visit the `/health` endpoint or check the server logs.
 
 ### Model Training
 The sentiment analysis model is automatically trained on first use. The model file is saved as `backend/model.joblib`.

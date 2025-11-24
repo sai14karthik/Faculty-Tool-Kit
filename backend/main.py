@@ -35,6 +35,7 @@ from utils import (
     simple_summarize,
     openai_summarize,
     openai_predict_sentiment,
+    openai_extract_keywords,
     is_openai_available
 )
 
@@ -217,8 +218,21 @@ def analyze_keywords(req: TextRequest, save_csv: bool = True):
         if not req.text or not req.text.strip():
             raise HTTPException(status_code=400, detail="Text cannot be empty")
         
-        # Use the better keyword_analysis from utils.py
-        result = keyword_analysis(req.text, top_k=10)
+        result = None
+        
+        # Try OpenAI for keyword extraction first
+        if is_openai_available():
+            try:
+                result = openai_extract_keywords(req.text, top_k=10)
+                if result:
+                    print("✓ Using OpenAI for keyword extraction")
+            except Exception as e:
+                print(f"Warning: OpenAI keyword extraction failed, using fallback: {e}")
+        
+        # Fallback to simple keyword analysis
+        if not result:
+            result = keyword_analysis(req.text, top_k=10)
+            print("Using simple keyword extraction")
         
         # Log request to database
         try:
@@ -274,9 +288,18 @@ def predict_sentiment(req: TextRequest, save_csv: bool = True):
         # Fallback to utils.py model
         if not response:
             result = utils_predict_sentiment(req.text)
+            label = "POSITIVE" if result["prediction"] == 1 else "NEGATIVE"
+            score = result["positive_prob"]
+            
+            # Normalize score: if NEGATIVE, score should be 0.0-0.5
+            if label == "NEGATIVE" and score > 0.5:
+                score = 1.0 - score
+            elif label == "POSITIVE" and score < 0.5:
+                score = 0.5 + (0.5 - score)
+            
             response = {
-                "label": "POSITIVE" if result["prediction"] == 1 else "NEGATIVE",
-                "score": result["positive_prob"]
+                "label": label,
+                "score": max(0.0, min(1.0, score))
             }
             print("Using local model for sentiment analysis")
         

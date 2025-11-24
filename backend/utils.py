@@ -1,17 +1,17 @@
 # backend/utils.py
-from typing import Dict, Optional
+from typing import Dict, Optional, Any
 import re
 import json
 from collections import Counter
-import joblib
 from pathlib import Path
 import os
+import logging
 
-# ML imports
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.linear_model import LogisticRegression
+# ----------------- Logging Setup -----------------
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
 
-# OpenAI imports
+# ----------------- OpenAI Setup -----------------
 try:
     from openai import OpenAI
     OPENAI_AVAILABLE = True
@@ -20,344 +20,180 @@ except ImportError:
     OpenAI = None
 
 MODEL_PATH = Path(__file__).parent / "model.joblib"
+_openai_client: Optional[OpenAI] = None
 
-# Initialize OpenAI client if API key is available
-_openai_client = None
 
-def get_openai_client():
+def get_openai_client() -> Optional[OpenAI]:
     """Get or create OpenAI client instance"""
     global _openai_client
     if not OPENAI_AVAILABLE:
         return None
-    
+
     if _openai_client is None:
         api_key = os.getenv("OPENAI_API_KEY")
-        if api_key:
-            _openai_client = OpenAI(api_key=api_key)
-        else:
+        if not api_key:
+            logger.warning("OPENAI_API_KEY not found in environment variables.")
             return None
-    
+        _openai_client = OpenAI(api_key=api_key)
+
     return _openai_client
+
 
 def is_openai_available() -> bool:
     """Check if OpenAI API is available and configured"""
     return OPENAI_AVAILABLE and get_openai_client() is not None
 
-# ---------- Summarizer ----------
+
+# ----------------- Fallback Summarizer -----------------
 def simple_summarize(text: str, max_sentences: int = 2) -> str:
-    # very simple sentence split on punctuation
+    """Simple fallback summarizer that extracts first sentences"""
     text = text.strip()
-    # Check if text has sentence-ending punctuation
-    has_sentence_end = bool(re.search(r'[.!?]\s*$', text)) or bool(re.search(r'[.!?]\s+', text))
-    
-    if has_sentence_end:
-        sents = re.split(r'(?<=[.!?])\s+', text)
-        sents = [s.strip() for s in sents if s.strip()]
-        if sents:
-            return " ".join(sents[:max_sentences])
-    
-    # If no sentence breaks found or no sentence-ending punctuation, try to create a summary
-    text_lower = text.lower()
-    
-    # Try to find natural break points
-    # Look for "because" - cut before it to get just the main point
-    because_pos = text_lower.find(' because ', 20)
-    if because_pos > 0:
-        # Take everything up to (but not including) "because" as the main point
-        summary = text[:because_pos].strip()
-        return summary
-    
-    # Look for other break points
-    for pattern in [',', ';', ' but ', ' and ', ' however ']:
-        pos = text_lower.find(pattern, 30)
-        if pos > 0:
-            if pattern in [' but ', ' and ', ' however ']:
-                cutoff = pos + len(pattern)
-            else:
-                cutoff = pos + 1
-            summary = text[:cutoff].strip()
-            if cutoff < len(text):
-                summary += "..."
-            return summary
-    
-    # For longer texts without break points, take first 100 chars at word boundary
+    if not text:
+        return text
+
+    sentences = re.split(r'(?<=[.!?])\s+', text)
+    sentences = [s.strip() for s in sentences if s.strip()]
+
+    if sentences:
+        return " ".join(sentences[:max_sentences])
+
     if len(text) > 100:
         cutoff = text.rfind(' ', 0, 100)
-        if cutoff > 50:
-            return text[:cutoff].strip() + "..."
-    
-    # For short texts without punctuation or break points, return as is
+        if cutoff == -1:
+            cutoff = 100
+        return text[:cutoff].strip() + "..."
     return text
 
-# ---------- Analyzer (keyword extraction) ----------
-STOPWORDS = {
-    "the","and","is","in","to","of","a","for","on","that","this","it","with","as","are","was","an","by","be",
-    "were","but","or","if","so","at","from","not","have","has","had","do","does","did","will","would","could",
-    "should","may","might","can","must","been","being","them","they","their","there","these","those","which",
-    "what","when","where","who","why","how","all","each","every","some","any","no","more","most","other",
-    "such","than","then","too","very","just","only","also","even","much","many","most","more","very","well",
-    "your","you","because","often","putting","into","about","into","onto","upon","within","without","during",
-    "let","lets","make","makes","made","them","more","most","get","got","go","goes","went","come","comes","came"
-}
 
-POSITIVE_CUES = {
-    "excellent","engaging","helpful","clear","organized","enjoyed","supportive","insightful","great","positive",
-    "well-structured","effective","fantastic","improved","better","confident","motivated","useful","responsive"
-}
+# ----------------- Fallback Keyword Extraction -----------------
+STOPWORDS = set([
+    "the", "and", "is", "in", "to", "of", "a", "for", "on", "that", "this", "it",
+    "with", "as", "are", "was", "an", "by", "be", "were", "but", "or", "if", "so",
+    "at", "from", "not", "have", "has", "had", "do", "does", "did", "will", "would",
+    "could", "should", "may", "might", "can", "must", "been", "being", "them",
+    "they", "their", "there", "these", "those", "which", "what", "when", "where",
+    "who", "why", "how", "all", "each", "every", "some", "any", "no", "more",
+    "most", "other", "such", "than", "then", "too", "very", "just", "only",
+    "also", "even", "much", "many", "well", "your", "you", "because", "often",
+    "putting", "about", "onto", "upon", "within", "without", "during", "let",
+    "lets", "make", "makes", "made", "get", "got", "go", "goes", "went", "come",
+    "comes", "came"
+])
 
-NEGATIVE_CUES = {
-    "poorly","confusing","difficult","frustrating","unhelpful","disorganized","messy","unclear","boring","slow",
-    "negative","bad","terrible","awful","annoying","incomplete","late","missing","unresponsive","hard","struggle",
-    "struggling","lack","lacking","dissatisfied","disappointed","worse","problem","issue","painful","overwhelming"
-}
 
-# Thresholds for probabilistic model interpretation
-POS_THRESHOLD = 0.6
-NEG_THRESHOLD = 0.4
-
-def keyword_analysis(text: str, top_k: int = 10) -> Dict:
-    # simple tokenization / frequency with better stopword filtering
-    tokens = re.findall(r'\b[a-zA-Z]{3,}\b', text.lower())  # Minimum 3 characters
+def keyword_analysis(text: str, top_k: int = 10) -> Dict[str, Any]:
+    """Extract keywords from text using simple frequency analysis"""
+    tokens = re.findall(r'\b[a-zA-Z]{3,}\b', text.lower())
     tokens = [t for t in tokens if t not in STOPWORDS]
     counts = Counter(tokens)
     most = counts.most_common(top_k)
     keywords = [{"term": t, "count": c} for t, c in most]
     return {"keywords": keywords, "unique_terms": len(counts)}
 
-# ---------- Simple sentiment/predictor model ----------
-def train_small_model():
-    # Comprehensive and diverse dataset for better generalization
-    texts = [
-        # Positive examples - various phrasings
-        "great class and engaging lectures",
-        "helpful and clear instructions",
-        "the instructor provided useful feedback",
-        "I learned a lot and enjoyed the labs",
-        "excellent course with clear explanations",
-        "the lectures were clear and engaging",
-        "overall the class was good",
-        "very helpful professor and good materials",
-        "enjoyed the course and learned much",
-        "clear and well-organized content",
-        "good course with useful assignments",
-        "the instructor was helpful and clear",
-        "your essay demonstrates strong organisation",
-        "strong work with good analysis",
-        "demonstrates strong understanding of the material",
-        "excellent work, let's work on improving details",
-        "strong foundation, let's develop it further",
-        "well done on this assignment",
-        "impressive work and thorough analysis",
-        "good job on completing the project",
-        "your presentation was excellent",
-        "solid understanding of the concepts",
-        "creative approach to the problem",
-        "thoughtful response to the question",
-        "well-structured and organized work",
-        "clear communication of ideas",
-        "demonstrates good critical thinking",
-        "effective use of examples",
-        "strong grasp of the material",
-        # Mixed but overall positive (constructive feedback)
-        "assignments were sometimes confusing but overall good",
-        "some parts were unclear but the class was good",
-        "lectures were clear and engaging, assignments were sometimes confusing but overall the class was good",
-        "your essay demonstrates strong organisation, but let's work on developing topic sentences",
-        "good work overall, let's focus on improving clarity",
-        "strong analysis, but we can work on structure",
-        "well done, though we could improve the conclusion",
-        "good effort, let's refine the introduction",
-        "solid work, but needs more supporting evidence",
-        "strong start, let's develop the main points further",
-        "good foundation, we can work on making it more concise",
-        "excellent ideas, let's work on better organization",
-        "strong argument, but let's strengthen the evidence",
-        # Negative examples - various phrasings
-        "bad lectures and poor explanation",
-        "assignments were unclear and confusing",
-        "the course was disorganized",
-        "I did not like the grading policy",
-        "poor instruction and unclear materials",
-        "the lectures were confusing and unhelpful",
-        "overall the class was bad",
-        "terrible course with no clear direction",
-        "assignments were very confusing",
-        "the instructor was unhelpful",
-        "disorganized and unclear content",
-        "did not enjoy the course",
-        "your work is often messy and incomplete",
-        "work is messy and incomplete because not putting in effort",
-        "not putting in much effort",
-        "work is often messy",
-        "incomplete work and lack of effort",
-        "poor quality work and minimal effort",
-        "submitted work is messy",
-        "work lacks effort and is incomplete",
-        "this needs significant improvement",
-        "the work is below expectations",
-        "unclear and poorly organized",
-        "lacks understanding of the material",
-        "weak analysis and insufficient detail",
-        "does not meet the requirements",
-        "poorly written and difficult to follow",
-        "inadequate explanation of concepts",
-        "missing key points and details",
-        "needs major revision",
-        "unacceptable quality of work",
-        "fails to address the main question",
-        "weak argument with no supporting evidence",
-        "confusing and poorly structured",
-    ]
-    labels = ([1] * 28 +  # positive examples (28)
-              [1] * 12 +  # mixed but positive (constructive feedback) (12)
-              [0] * 36)   # negative examples (36)
-    # Use more features and better n-gram range for better generalization
-    vect = TfidfVectorizer(ngram_range=(1,3), max_features=1000, min_df=1, max_df=0.95)
-    X = vect.fit_transform(texts)
-    # Use regularization to prevent overfitting and improve generalization
-    clf = LogisticRegression(max_iter=2000, C=0.5, penalty='l2')
-    clf.fit(X, labels)
-    joblib.dump((vect, clf), MODEL_PATH)
-    return vect, clf
 
-def load_model():
-    if MODEL_PATH.exists():
-        vect, clf = joblib.load(MODEL_PATH)
+# ----------------- Fallback Sentiment Analysis -----------------
+def predict_sentiment(text: str) -> Dict[str, Any]:
+    """Simple fallback sentiment prediction"""
+    text_lower = text.lower()
+    positive_words = ["good", "great", "excellent", "helpful", "clear", "enjoyed", "useful", "interesting", "well"]
+    negative_words = ["difficult", "rushed", "overwhelming", "too fast", "piling", "problem", "issue", "bad", "poor"]
+    negative_phrases = ["too fast", "felt rushed", "overwhelming", "difficult to", "piling up"]
+
+    pos_count = sum(word in text_lower for word in positive_words)
+    neg_count = sum(word in text_lower for word in negative_words) + sum(phrase in text_lower for phrase in negative_phrases)
+
+    if neg_count > pos_count:
+        return {"prediction": 0, "positive_prob": 0.3, "confidence": 0.5}
+    elif pos_count > neg_count:
+        return {"prediction": 1, "positive_prob": 0.7, "confidence": 0.5}
     else:
-        vect, clf = train_small_model()
-    return vect, clf
+        return {"prediction": 0, "positive_prob": 0.4, "confidence": 0.3}
 
-def predict_sentiment(text: str) -> Dict:
-    vect, clf = load_model()
-    try:
-        X = vect.transform([text])
-        prob = clf.predict_proba(X)[0][1]  # probability positive
-        text_lower = text.lower()
-        pos_cues = sum(1 for word in POSITIVE_CUES if word in text_lower)
-        neg_cues = sum(1 for word in NEGATIVE_CUES if word in text_lower)
 
-        if prob <= NEG_THRESHOLD:
-            pred = 0
-        elif prob >= POS_THRESHOLD:
-            pred = 1
-        else:
-            if neg_cues > pos_cues:
-                pred = 0
-            elif pos_cues > neg_cues:
-                pred = 1
-            else:
-                pred = int(prob >= 0.5)
-        
-        base_confidence = abs(prob - 0.5) * 2
-        if POS_THRESHOLD > prob > NEG_THRESHOLD and pos_cues != neg_cues:
-            base_confidence = min(1.0, base_confidence + 0.2)
-
-        return {
-            "prediction": pred, 
-            "positive_prob": float(prob),
-            "confidence": float(round(base_confidence, 3))
-        }
-    except Exception as e:
-        # Fallback: simple keyword-based sentiment if model fails
-        text_lower = text.lower()
-        pos_count = sum(1 for word in POSITIVE_CUES if word in text_lower)
-        neg_count = sum(1 for word in NEGATIVE_CUES if word in text_lower)
-        
-        if pos_count > neg_count:
-            return {"prediction": 1, "positive_prob": 0.6, "confidence": 0.3}
-        elif neg_count > pos_count:
-            return {"prediction": 0, "positive_prob": 0.4, "confidence": 0.3}
-        else:
-            return {"prediction": 1, "positive_prob": 0.5, "confidence": 0.1}
-
-# ---------- OpenAI Functions ----------
+# ----------------- OpenAI Summarization -----------------
 def openai_summarize(text: str, max_length: int = 150) -> Optional[str]:
-    """Summarize text using OpenAI API - optimized for academic feedback and course content"""
+    """Summarize text using OpenAI API"""
     client = get_openai_client()
     if not client:
         return None
-    
+
     try:
-        # Calculate appropriate max_tokens (roughly 4 characters per token, but be generous)
-        max_tokens = min(max_length * 2, 500)  # Allow enough tokens for the summary
-        
+        max_tokens = min(int(max_length * 1.5), 500)
         response = client.chat.completions.create(
             model="gpt-3.5-turbo",
             messages=[
-                {
-                    "role": "system", 
-                    "content": "You are an expert academic assistant specializing in summarizing course materials, student feedback, and educational content. Create clear, concise summaries that capture the main points and key insights. Focus on preserving important academic terminology and concepts."
-                },
-                {
-                    "role": "user", 
-                    "content": f"Please provide a concise summary of the following academic text. Aim for approximately {max_length} words, focusing on the main points, key concepts, and important details:\n\n{text}"
-                }
+                {"role": "system",
+                 "content": "You are an expert academic assistant. Summarize feedback or course content concisely."},
+                {"role": "user",
+                 "content": f"Summarize the following text in ~{max_length} words, synthesizing the main points:\n\n{text}"}
             ],
             max_tokens=max_tokens,
             temperature=0.3
         )
-        summary = response.choices[0].message.content.strip()
-        return summary
+        return response.choices[0].message["content"].strip()
     except Exception as e:
-        print(f"OpenAI summarization error: {e}")
+        logger.error(f"OpenAI summarization error: {e}")
         return None
 
-def openai_predict_sentiment(text: str) -> Optional[Dict]:
-    """Analyze sentiment using OpenAI API - optimized for academic feedback and student evaluations"""
+
+# ----------------- OpenAI Sentiment Analysis -----------------
+def openai_predict_sentiment(text: str) -> Optional[Dict[str, Any]]:
+    """Analyze sentiment using OpenAI API"""
     client = get_openai_client()
     if not client:
         return None
-    
+
     try:
         response = client.chat.completions.create(
             model="gpt-3.5-turbo",
             messages=[
-                {
-                    "role": "system", 
-                    "content": """You are an expert sentiment analyst specializing in academic feedback, student evaluations, and course reviews. 
-                    
-Analyze the sentiment and return ONLY a valid JSON object with:
-- "label": either "POSITIVE" or "NEGATIVE" 
-- "score": a number between 0.0 and 1.0 where:
-  * 0.0-0.3 = strongly negative
-  * 0.3-0.5 = somewhat negative/neutral
-  * 0.5-0.7 = somewhat positive
-  * 0.7-1.0 = strongly positive
-
-Consider the context of academic feedback - constructive criticism with positive intent should be scored appropriately. 
-Mixed feedback should be evaluated based on overall tone and intent."""
-                },
-                {
-                    "role": "user", 
-                    "content": f"Analyze the sentiment of this academic feedback or course evaluation. Return only valid JSON with 'label' and 'score':\n\n{text}"
-                }
+                {"role": "system",
+                 "content": "You are an expert sentiment analyst for academic feedback. Return only JSON with 'label' and 'score'."},
+                {"role": "user",
+                 "content": f"Analyze the sentiment of this text and return JSON:\n\n{text}"}
             ],
-            temperature=0.2,  # Lower temperature for more consistent sentiment analysis
+            temperature=0.2,
             response_format={"type": "json_object"}
         )
-        result = response.choices[0].message.content.strip()
-        sentiment_data = json.loads(result)
-        
-        # Normalize the response format
-        label = sentiment_data.get("label", "POSITIVE").upper()
-        if label not in ["POSITIVE", "NEGATIVE"]:
-            # If label is not standard, infer from score
-            score_val = float(sentiment_data.get("score", 0.5))
-            label = "POSITIVE" if score_val >= 0.5 else "NEGATIVE"
-        
-        score = float(sentiment_data.get("score", 0.5))
-        
-        # Ensure score is between 0 and 1
-        score = max(0.0, min(1.0, score))
-        
-        # If label is NEGATIVE, ensure score reflects negativity (invert if needed)
-        if label == "NEGATIVE" and score > 0.5:
-            score = 1.0 - score
-        
-        return {
-            "label": label,
-            "score": score
-        }
+        result = json.loads(response.choices[0].message["content"].strip())
+        label = result.get("label", "POSITIVE").upper()
+        score = float(result.get("score", 0.5))
+
+        # Normalize score
+        if label == "NEGATIVE":
+            score = min(max(0.0, 0.5 if score > 0.5 else score), 0.5)
+        else:
+            score = min(max(0.5, score), 1.0)
+
+        return {"label": label, "score": score}
     except Exception as e:
-        print(f"OpenAI sentiment analysis error: {e}")
+        logger.error(f"OpenAI sentiment analysis error: {e}")
+        return None
+
+
+# ----------------- OpenAI Keyword Extraction -----------------
+def openai_extract_keywords(text: str, top_k: int = 10) -> Optional[Dict[str, Any]]:
+    """Extract keywords using OpenAI API"""
+    client = get_openai_client()
+    if not client:
+        return None
+
+    try:
+        response = client.chat.completions.create(
+            model="gpt-3.5-turbo",
+            messages=[
+                {"role": "system",
+                 "content": "Extract top keywords from academic feedback or text. Return only JSON with 'keywords' and 'unique_terms'."},
+                {"role": "user",
+                 "content": f"Extract top {top_k} keywords from the text:\n\n{text}"}
+            ],
+            temperature=0.3,
+            response_format={"type": "json_object"}
+        )
+        data = json.loads(response.choices[0].message["content"].strip())
+        keywords = [{"term": kw.get("term", ""), "count": int(kw.get("count", 1))}
+                    for kw in data.get("keywords", [])][:top_k]
+        return {"keywords": keywords, "unique_terms": data.get("unique_terms", len(keywords))}
+    except Exception as e:
+        logger.error(f"OpenAI keyword extraction error: {e}")
         return None

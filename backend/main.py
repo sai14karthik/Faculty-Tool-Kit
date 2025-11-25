@@ -18,21 +18,9 @@ try:
 except ImportError:
     print("Warning: python-dotenv not installed. Set OPENAI_API_KEY as environment variable.")
 
-# Try to import transformers, but allow server to start without it
-try:
-    from transformers import pipeline
-    TRANSFORMERS_AVAILABLE = True
-except Exception as e:
-    print(f"Warning: transformers not available: {e}")
-    TRANSFORMERS_AVAILABLE = False
-    pipeline = None
-
 # Import local modules
 from db import log_request, reset_requests
 from utils import (
-    keyword_analysis, 
-    predict_sentiment as utils_predict_sentiment, 
-    simple_summarize,
     openai_summarize,
     openai_predict_sentiment,
     openai_extract_keywords,
@@ -141,22 +129,6 @@ app.add_middleware(
 )
 
 # --------------------------
-# PIPELINES
-# --------------------------
-
-# Initialize pipelines with error handling
-summarizer = None
-sentiment = None
-if TRANSFORMERS_AVAILABLE and pipeline is not None:
-    try:
-        summarizer = pipeline("summarization", model="facebook/bart-large-cnn")
-        sentiment = pipeline("sentiment-analysis")
-    except Exception as e:
-        print(f"Warning: Could not initialize transformers pipelines: {e}")
-        summarizer = None
-        sentiment = None
-
-# --------------------------
 # ENDPOINTS
 # --------------------------
 
@@ -166,33 +138,12 @@ def summarize_text(req: TextRequest, save_csv: bool = True):
         if not req.text or not req.text.strip():
             raise HTTPException(status_code=400, detail="Text cannot be empty")
         
-        summary = None
-        
-        # Use OpenAI for summarization (primary method for best results)
-        if is_openai_available():
-            try:
-                summary = openai_summarize(req.text, max_length=150)
-                if summary:
-                    print("✓ Using OpenAI GPT-3.5-turbo for summarization")
-            except Exception as e:
-                print(f"Warning: OpenAI summarization failed, trying fallback: {e}")
-        
-        # Try transformers if OpenAI didn't work
-        if not summary and summarizer is not None:
-            try:
-                result = summarizer(req.text, max_length=120, min_length=30, do_sample=False)
-                summary = result[0]["summary_text"]
-                print("Using Transformers for summarization")
-            except Exception as e:
-                print(f"Warning: Transformers summarization failed, using simple fallback: {e}")
-        
-        # Use simple fallback summarizer as last resort
+        if not is_openai_available():
+            raise HTTPException(status_code=503, detail="OpenAI API key not configured.")
+
+        summary = openai_summarize(req.text, max_length=150)
         if not summary:
-            summary = simple_summarize(req.text, max_sentences=2)
-            print("Using simple summarizer")
-        
-        if not summary:
-            summary = req.text[:100] + "..." if len(req.text) > 100 else req.text
+            raise HTTPException(status_code=503, detail="OpenAI summarization failed.")
         
         # Log request to database
         try:
@@ -218,21 +169,12 @@ def analyze_keywords(req: TextRequest, save_csv: bool = True):
         if not req.text or not req.text.strip():
             raise HTTPException(status_code=400, detail="Text cannot be empty")
         
-        result = None
-        
-        # Try OpenAI for keyword extraction first
-        if is_openai_available():
-            try:
-                result = openai_extract_keywords(req.text, top_k=10)
-                if result:
-                    print("✓ Using OpenAI for keyword extraction")
-            except Exception as e:
-                print(f"Warning: OpenAI keyword extraction failed, using fallback: {e}")
-        
-        # Fallback to simple keyword analysis
+        if not is_openai_available():
+            raise HTTPException(status_code=503, detail="OpenAI API key not configured.")
+
+        result = openai_extract_keywords(req.text, top_k=10)
         if not result:
-            result = keyword_analysis(req.text, top_k=10)
-            print("Using simple keyword extraction")
+            raise HTTPException(status_code=503, detail="OpenAI keyword extraction failed.")
         
         # Log request to database
         try:
@@ -258,50 +200,12 @@ def predict_sentiment(req: TextRequest, save_csv: bool = True):
         if not req.text or not req.text.strip():
             raise HTTPException(status_code=400, detail="Text cannot be empty")
         
-        response = None
-        
-        # Use OpenAI for sentiment analysis (primary method for best results)
-        if is_openai_available():
-            try:
-                openai_result = openai_predict_sentiment(req.text)
-                if openai_result:
-                    response = openai_result
-                    print("✓ Using OpenAI GPT-3.5-turbo for sentiment analysis")
-            except Exception as e:
-                print(f"Warning: OpenAI sentiment analysis failed, trying fallback: {e}")
-        
-        # Try transformers if OpenAI didn't work
-        if not response and sentiment is not None:
-            try:
-                result = sentiment(req.text)[0]
-                # Normalize label to POSITIVE/NEGATIVE
-                label = result["label"].upper()
-                if label == "POSITIVE":
-                    response = {"label": "POSITIVE", "score": result["score"]}
-                else:
-                    # If label is NEGATIVE, invert the score
-                    response = {"label": "NEGATIVE", "score": 1.0 - result["score"]}
-                print("Using Transformers for sentiment analysis")
-            except Exception as e:
-                print(f"Warning: Transformers sentiment analysis failed, using fallback: {e}")
-        
-        # Fallback to utils.py model
+        if not is_openai_available():
+            raise HTTPException(status_code=503, detail="OpenAI API key not configured.")
+
+        response = openai_predict_sentiment(req.text)
         if not response:
-            result = utils_predict_sentiment(req.text)
-            label = "POSITIVE" if result["prediction"] == 1 else "NEGATIVE"
-            score = result["positive_prob"]
-            
-            # Normalize score: if NEGATIVE, score should be 0.0-0.5
-            if label == "NEGATIVE" and score > 0.5:
-                score = 1.0 - score
-            elif label == "POSITIVE" and score < 0.5:
-                score = 0.5 + (0.5 - score)
-            
-            response = {
-                "label": label,
-                "score": max(0.0, min(1.0, score))
-            }
-            print("Using local model for sentiment analysis")
+            raise HTTPException(status_code=503, detail="OpenAI sentiment analysis failed.")
         
         # Log request to database
         try:
@@ -427,7 +331,6 @@ def health_check():
     """Health check endpoint"""
     return {
         "status": "healthy",
-        "transformers_available": TRANSFORMERS_AVAILABLE,
         "openai_available": is_openai_available(),
         "database": "connected"
     }

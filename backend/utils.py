@@ -1,9 +1,6 @@
 # backend/utils.py
 from typing import Dict, Optional, Any
-import re
 import json
-from collections import Counter
-from pathlib import Path
 import os
 import logging
 
@@ -15,11 +12,11 @@ logger.setLevel(logging.INFO)
 try:
     from openai import OpenAI
     OPENAI_AVAILABLE = True
-except ImportError:
+except Exception as exc:  # catch broader errors (e.g., requests SSL issues)
     OPENAI_AVAILABLE = False
     OpenAI = None
+    logger.warning("OpenAI SDK unavailable: %s", exc)
 
-MODEL_PATH = Path(__file__).parent / "model.joblib"
 _openai_client: Optional[OpenAI] = None
 
 
@@ -42,72 +39,6 @@ def get_openai_client() -> Optional[OpenAI]:
 def is_openai_available() -> bool:
     """Check if OpenAI API is available and configured"""
     return OPENAI_AVAILABLE and get_openai_client() is not None
-
-
-# ----------------- Fallback Summarizer -----------------
-def simple_summarize(text: str, max_sentences: int = 2) -> str:
-    """Simple fallback summarizer that extracts first sentences"""
-    text = text.strip()
-    if not text:
-        return text
-
-    sentences = re.split(r'(?<=[.!?])\s+', text)
-    sentences = [s.strip() for s in sentences if s.strip()]
-
-    if sentences:
-        return " ".join(sentences[:max_sentences])
-
-    if len(text) > 100:
-        cutoff = text.rfind(' ', 0, 100)
-        if cutoff == -1:
-            cutoff = 100
-        return text[:cutoff].strip() + "..."
-    return text
-
-
-# ----------------- Fallback Keyword Extraction -----------------
-STOPWORDS = set([
-    "the", "and", "is", "in", "to", "of", "a", "for", "on", "that", "this", "it",
-    "with", "as", "are", "was", "an", "by", "be", "were", "but", "or", "if", "so",
-    "at", "from", "not", "have", "has", "had", "do", "does", "did", "will", "would",
-    "could", "should", "may", "might", "can", "must", "been", "being", "them",
-    "they", "their", "there", "these", "those", "which", "what", "when", "where",
-    "who", "why", "how", "all", "each", "every", "some", "any", "no", "more",
-    "most", "other", "such", "than", "then", "too", "very", "just", "only",
-    "also", "even", "much", "many", "well", "your", "you", "because", "often",
-    "putting", "about", "onto", "upon", "within", "without", "during", "let",
-    "lets", "make", "makes", "made", "get", "got", "go", "goes", "went", "come",
-    "comes", "came"
-])
-
-
-def keyword_analysis(text: str, top_k: int = 10) -> Dict[str, Any]:
-    """Extract keywords from text using simple frequency analysis"""
-    tokens = re.findall(r'\b[a-zA-Z]{3,}\b', text.lower())
-    tokens = [t for t in tokens if t not in STOPWORDS]
-    counts = Counter(tokens)
-    most = counts.most_common(top_k)
-    keywords = [{"term": t, "count": c} for t, c in most]
-    return {"keywords": keywords, "unique_terms": len(counts)}
-
-
-# ----------------- Fallback Sentiment Analysis -----------------
-def predict_sentiment(text: str) -> Dict[str, Any]:
-    """Simple fallback sentiment prediction"""
-    text_lower = text.lower()
-    positive_words = ["good", "great", "excellent", "helpful", "clear", "enjoyed", "useful", "interesting", "well"]
-    negative_words = ["difficult", "rushed", "overwhelming", "too fast", "piling", "problem", "issue", "bad", "poor"]
-    negative_phrases = ["too fast", "felt rushed", "overwhelming", "difficult to", "piling up"]
-
-    pos_count = sum(word in text_lower for word in positive_words)
-    neg_count = sum(word in text_lower for word in negative_words) + sum(phrase in text_lower for phrase in negative_phrases)
-
-    if neg_count > pos_count:
-        return {"prediction": 0, "positive_prob": 0.3, "confidence": 0.5}
-    elif pos_count > neg_count:
-        return {"prediction": 1, "positive_prob": 0.7, "confidence": 0.5}
-    else:
-        return {"prediction": 0, "positive_prob": 0.4, "confidence": 0.3}
 
 
 # ----------------- OpenAI Summarization -----------------
@@ -137,8 +68,34 @@ def openai_summarize(text: str, max_length: int = 150) -> Optional[str]:
 
 
 # ----------------- OpenAI Sentiment Analysis -----------------
+NEGATIVE_INDICATORS = [
+    # Workload, Pacing, and Effort
+    "too fast", "rushed", "overwhelming", "difficult", "stressful",
+    "too heavy", "overloaded", "heavy workload", "workload", "unsustainable",
+    "crammed", "busywork", "pointless",
+    
+    # Clarity and Organization
+    "confusing", "unclear", "vague", "poorly organized", "disorganized",
+    "inconsistent", "needs improvement", "should improve", "could be better",
+    "rambling", "disconnected",
+    
+    # Assessment and Fairness
+    "unfair", "delayed" , "grading criteria", "minor details", "arbitrary",
+    "subjective", "biased", "unjustified", "cryptic" ,
+    
+    # Quality of Content and Instruction
+    "lack of", "not enough", "needed more explanation", "irrelevant",
+    "outdated", "monotonous", "boring", "repetitive", "dull", "superficial",
+    
+    # Affective and Communication
+    "problem", "issue", "concern", "complaint", "frustrating",
+    "hard to", "unresponsive", "unapproachable", "patronizing", "generic",
+    "inaccessible", "demoralizing"
+]
+
+
 def openai_predict_sentiment(text: str) -> Optional[Dict[str, Any]]:
-    """Analyze sentiment using OpenAI API"""
+    """Analyze sentiment using OpenAI API with heuristic safeguards for negative feedback"""
     client = get_openai_client()
     if not client:
         return None
@@ -158,6 +115,14 @@ def openai_predict_sentiment(text: str) -> Optional[Dict[str, Any]]:
         result = json.loads(response.choices[0].message["content"].strip())
         label = result.get("label", "POSITIVE").upper()
         score = float(result.get("score", 0.5))
+
+        text_lower = text.lower()
+        has_negative_indicators = any(phrase in text_lower for phrase in NEGATIVE_INDICATORS)
+
+        # If OpenAI claims POSITIVE but we detect clear negative signals, override
+        if label == "POSITIVE" and has_negative_indicators and score < 0.8:
+            label = "NEGATIVE"
+            score = min(score, 0.5)
 
         # Normalize score
         if label == "NEGATIVE":

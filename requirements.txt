@@ -1,12 +1,6 @@
 fastapi
 uvicorn[standard]
-scikit-learn
-joblib
-pandas
 python-multipart
-transformers
-torch
-numpy
 requests
 openai
 python-dotenv

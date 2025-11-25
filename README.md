@@ -1,6 +1,6 @@
 # 🎓 Faculty Toolkit
 
-An AI-powered web application for analyzing academic feedback, course notes, and student evaluations. Built with FastAPI, scikit-learn, and modern web technologies.
+An AI-powered web application for analyzing academic feedback, course notes, and student evaluations. Built with FastAPI, the OpenAI API, and modern web technologies.
 
 ## ✨ Features
 
@@ -190,17 +190,8 @@ faculty_toolkit/
 ## 🔧 Configuration
 
 ### OpenAI API Integration
-The application uses a smart fallback system:
-1. **OpenAI API** (if configured) - Provides the best quality summaries and sentiment analysis
-2. **Transformers/HuggingFace** - Fallback if OpenAI is not available
-3. **Local ML Models** - Final fallback using scikit-learn
-
-To check if OpenAI is configured, visit the `/health` endpoint or check the server logs.
-
-### Model Training
-The sentiment analysis model is automatically trained on first use. The model file is saved as `backend/model.joblib`.
-
-To retrain the model, delete `backend/model.joblib` and restart the server.
+All AI-powered features now rely exclusively on the OpenAI API. Make sure `OPENAI_API_KEY` is set (either via environment variable or `.env`) before starting the backend.  
+Use `GET /health` to confirm OpenAI connectivity.
 
 ### Database
 The SQLite database is automatically created on first run. Location: `backend/faculty_toolkit.db`
@@ -221,21 +212,8 @@ curl http://127.0.0.1:8000/stats
 
 ## 📊 Technologies Used
 
-- **Backend:**
-  - FastAPI - Modern Python web framework
-  - scikit-learn - Machine learning
-  - SQLite - Database
-  - uvicorn - ASGI server
-
-- **Frontend:**
-  - Vanilla JavaScript
-  - Modern CSS
-  - Responsive design
-
-- **ML Models:**
-  - Logistic Regression for sentiment analysis
-  - TF-IDF vectorization
-  - Custom keyword extraction
+- **Backend:** FastAPI, SQLite, Uvicorn, OpenAI API
+- **Frontend:** Vanilla JavaScript, modern CSS, Chart.js
 
 ## 🎯 Use Cases
 
